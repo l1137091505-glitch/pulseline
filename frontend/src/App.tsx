@@ -8,6 +8,10 @@ import {
 
 type WalletState = { signer: JsonRpcSigner | null; address: string; balance: string; creator: boolean; resolver: boolean };
 type Notice = { kind: "ok" | "error" | "pending"; text: string } | null;
+type WalletEventProvider = {
+  on?: (event: "accountsChanged" | "chainChanged", listener: (value: unknown) => void) => void;
+  removeListener?: (event: "accountsChanged" | "chainChanged", listener: (value: unknown) => void) => void;
+};
 
 const EMPTY_WALLET: WalletState = { signer: null, address: "", balance: "", creator: false, resolver: false };
 
@@ -46,7 +50,7 @@ export default function App() {
 
   useEffect(() => { void reload(); }, [reload]);
 
-  async function connect() {
+  const connect = useCallback(async () => {
     try {
       setNotice({ kind: "pending", text: "Waiting for your wallet…" });
       const connected = await connectWallet();
@@ -59,7 +63,29 @@ export default function App() {
       setWallet({ signer: connected.signer, address: connected.address, balance, creator, resolver });
       setNotice({ kind: "ok", text: "Wallet connected to BOT Chain." });
     } catch (error) { setNotice({ kind: "error", text: error instanceof Error ? error.message : "Wallet connection failed." }); }
-  }
+  }, []);
+
+  useEffect(() => {
+    const ethereum = (window as Window & { ethereum?: WalletEventProvider }).ethereum;
+    if (!ethereum?.on) return;
+
+    const handleAccountsChanged = (value: unknown) => {
+      if (Array.isArray(value) && value.length === 0) {
+        setWallet(EMPTY_WALLET);
+        setNotice({ kind: "error", text: "Wallet disconnected. Connect a wallet to continue." });
+        return;
+      }
+      void connect();
+    };
+    const handleChainChanged = () => { void connect(); };
+
+    ethereum.on("accountsChanged", handleAccountsChanged);
+    ethereum.on("chainChanged", handleChainChanged);
+    return () => {
+      ethereum.removeListener?.("accountsChanged", handleAccountsChanged);
+      ethereum.removeListener?.("chainChanged", handleChainChanged);
+    };
+  }, [connect]);
 
   const stats = useMemo(() => {
     const volume = markets.reduce((sum, m) => sum + m.totalYes + m.totalNo, 0n);
@@ -102,7 +128,7 @@ function Topbar({ wallet, connect }: { wallet: WalletState; connect(): void }) {
   return <header className="topbar">
     <div><span className="eyebrow">DECENTRALIZED FORECAST DESK</span><span className="top-date">{new Date().toLocaleDateString(undefined, { month: "short", day: "2-digit", year: "numeric" })}</span></div>
     <div className="top-actions"><a href={BOT_CHAIN.explorer} target="_blank" rel="noreferrer">Explorer ↗</a>
-      {wallet.address ? <button className="wallet-pill"><i />{short(wallet.address)} · {Number(wallet.balance).toFixed(2)} BOT</button> : <button className="primary small" onClick={connect}>Connect wallet</button>}
+      {wallet.address ? <button className="wallet-pill" onClick={connect} title="Refresh wallet connection"><i />{short(wallet.address)} · {Number(wallet.balance).toFixed(2)} BOT</button> : <button className="primary small" onClick={connect}>Connect wallet</button>}
     </div>
   </header>;
 }
@@ -133,7 +159,10 @@ function MarketsPage({ markets, loading }: { markets: Market[]; loading: boolean
 function MarketPage({ markets, wallet, setNotice, reload }: { markets: Market[]; wallet: WalletState; setNotice(v: Notice): void; reload(): Promise<void> }) {
   const { id } = useParams(); const navigate = useNavigate();
   const market = markets.find((m) => m.id === Number(id));
-  const [side, setSide] = useState<1|2>(1); const [amount, setAmount] = useState("10"); const [position, setPosition] = useState<Position|null>(null);
+  const [side, setSide] = useState<1|2>(1); const [amount, setAmount] = useState(""); const [position, setPosition] = useState<Position|null>(null);
+  useEffect(() => {
+    if (market) setAmount(formatEther(market.minStake));
+  }, [market?.id, market?.minStake]);
   const loadPosition = useCallback(async () => {
     if (!market || !wallet.address || !CONTRACT_ADDRESS) return;
     const contract = readContract()!; const [p, available] = await Promise.all([contract.getPosition(market.id,wallet.address),contract.claimable(market.id,wallet.address)]);
